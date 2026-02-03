@@ -11,6 +11,13 @@ import type {
   SegmentCaptions,
 } from '@/types';
 
+// Server processing state
+interface ServerProcessingState {
+  jobId: string | null;
+  videoUrl: string | null; // URL of uploaded video in Blob storage
+  outputUrl: string | null; // URL of processed video in Blob storage
+}
+
 // Default caption style
 const defaultCaptionStyle: CaptionStyle = {
   fontSize: 'medium',
@@ -51,6 +58,7 @@ interface ProjectStore {
   currentStep: WizardStep;
   project: Project;
   processing: ProcessingProgress;
+  serverProcessing: ServerProcessingState;
   isFFmpegLoaded: boolean;
   isPiperLoaded: boolean;
   isMediaPipeLoaded: boolean;
@@ -86,6 +94,11 @@ interface ProjectStore {
   setProcessingProgress: (progress: Partial<ProcessingProgress>) => void;
   resetProcessing: () => void;
 
+  // Server processing actions
+  setJobId: (jobId: string | null) => void;
+  setVideoUrl: (url: string | null) => void;
+  setOutputUrl: (url: string | null) => void;
+
   // Output actions
   setOutputVideo: (video: Blob | null) => void;
 
@@ -98,11 +111,19 @@ interface ProjectStore {
   resetProject: () => void;
 }
 
+// Initial server processing state
+const initialServerProcessing: ServerProcessingState = {
+  jobId: null,
+  videoUrl: null,
+  outputUrl: null,
+};
+
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   // Initial state
   currentStep: 'upload',
   project: createEmptyProject(),
   processing: initialProcessing,
+  serverProcessing: initialServerProcessing,
   isFFmpegLoaded: false,
   isPiperLoaded: false,
   isMediaPipeLoaded: false,
@@ -233,6 +254,22 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   resetProcessing: () => set({ processing: initialProcessing }),
 
+  // Server processing actions
+  setJobId: (jobId) =>
+    set((state) => ({
+      serverProcessing: { ...state.serverProcessing, jobId },
+    })),
+
+  setVideoUrl: (url) =>
+    set((state) => ({
+      serverProcessing: { ...state.serverProcessing, videoUrl: url },
+    })),
+
+  setOutputUrl: (url) =>
+    set((state) => ({
+      serverProcessing: { ...state.serverProcessing, outputUrl: url },
+    })),
+
   // Output actions
   setOutputVideo: (video) =>
     set((state) => ({
@@ -250,5 +287,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       currentStep: 'upload',
       project: createEmptyProject(),
       processing: initialProcessing,
+      serverProcessing: initialServerProcessing,
     }),
 }));

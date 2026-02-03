@@ -61,7 +61,7 @@ export interface FaceDetection {
 
 // Processing progress
 export interface ProcessingProgress {
-  stage: 'idle' | 'loading' | 'tts' | 'extracting' | 'detecting' | 'cropping' | 'stitching' | 'mixing' | 'complete' | 'error';
+  stage: 'idle' | 'uploading' | 'queued' | 'loading' | 'tts' | 'extracting' | 'detecting' | 'cropping' | 'stitching' | 'mixing' | 'complete' | 'error';
   currentSegment: number;
   totalSegments: number;
   stageProgress: number; // 0-100

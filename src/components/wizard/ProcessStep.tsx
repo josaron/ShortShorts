@@ -3,15 +3,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useProjectStore } from '@/store/projectStore';
 import { Button } from '@/components/ui';
-import { formatDuration } from '@/lib/utils/time';
+import type { JobStatusResponse } from '@/lib/server/types';
 
-// Import processing libraries
-import { getFFmpeg, extractClip, extractFrames, smartCrop, adjustDuration, getVideoDuration, getVideoDimensions, stitchSegments } from '@/lib/ffmpeg';
-import { synthesizeText } from '@/lib/piper';
-import { analyzeFramesForFaces, calculateOptimalCrop } from '@/lib/mediapipe';
-import { generateCaptions } from '@/lib/utils/captions';
-
-type ProcessingStage = 'loading' | 'tts' | 'extracting' | 'detecting' | 'cropping' | 'stitching' | 'complete' | 'error';
+type ProcessingStage = 'uploading' | 'queued' | 'loading' | 'tts' | 'extracting' | 'detecting' | 'cropping' | 'stitching' | 'complete' | 'error';
 
 interface ProcessingState {
   stage: ProcessingStage;
@@ -22,26 +16,32 @@ interface ProcessingState {
   error?: string;
 }
 
+const POLL_INTERVAL = 2000; // 2 seconds
+
 export function ProcessStep() {
   const {
     project,
+    serverProcessing,
     setProcessingProgress,
-    setOutputVideo,
+    setOutputUrl,
+    setJobId,
+    setVideoUrl,
     setCaptions,
     nextStep,
     prevStep,
   } = useProjectStore();
 
   const [processingState, setProcessingState] = useState<ProcessingState>({
-    stage: 'loading',
+    stage: 'uploading',
     currentSegment: 0,
     totalSegments: project.segments.length,
     progress: 0,
-    message: 'Initializing...',
+    message: 'Preparing to upload...',
   });
 
   const [isProcessing, setIsProcessing] = useState(false);
   const processingRef = useRef(false);
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
   const updateProgress = useCallback((updates: Partial<ProcessingState>) => {
     setProcessingState((prev) => ({ ...prev, ...updates }));
@@ -54,6 +54,110 @@ export function ProcessStep() {
     });
   }, [processingState, setProcessingProgress]);
 
+  /**
+   * Upload video to Vercel Blob storage
+   */
+  const uploadVideo = async (): Promise<string> => {
+    if (!project.videoFile) {
+      throw new Error('No video file to upload');
+    }
+
+    // Check if already uploaded
+    if (serverProcessing.videoUrl) {
+      return serverProcessing.videoUrl;
+    }
+
+    updateProgress({
+      stage: 'uploading',
+      progress: 10,
+      message: 'Uploading video...',
+    });
+
+    const formData = new FormData();
+    formData.append('file', project.videoFile);
+
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to upload video');
+    }
+
+    const result = await response.json();
+    setVideoUrl(result.url);
+
+    updateProgress({
+      stage: 'uploading',
+      progress: 100,
+      message: 'Video uploaded',
+    });
+
+    return result.url;
+  };
+
+  /**
+   * Start the processing job on the server
+   */
+  const startProcessing = async (videoUrl: string): Promise<string> => {
+    updateProgress({
+      stage: 'queued',
+      progress: 0,
+      message: 'Starting processing job...',
+    });
+
+    const requestBody = {
+      videoUrl,
+      segments: project.segments.map((seg) => ({
+        id: seg.id,
+        script: seg.script,
+        sourceTimestamp: seg.sourceTimestamp,
+        outputTime: seg.outputTime,
+      })),
+      voiceId: project.selectedVoice?.id || 'en_US-lessac-medium',
+      musicUrl: project.selectedMusic?.filePath 
+        ? `${window.location.origin}${project.selectedMusic.filePath}`
+        : undefined,
+      musicVolume: project.musicVolume,
+      includeCaptions: project.includeCaptions,
+    };
+
+    const response = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to start processing');
+    }
+
+    const result = await response.json();
+    setJobId(result.jobId);
+
+    return result.jobId;
+  };
+
+  /**
+   * Poll for job status
+   */
+  const pollJobStatus = async (jobId: string): Promise<JobStatusResponse> => {
+    const response = await fetch(`/api/status/${jobId}`);
+    
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to get job status');
+    }
+
+    return response.json();
+  };
+
+  /**
+   * Main processing flow
+   */
   const processVideo = useCallback(async () => {
     if (!project.videoFile || !project.selectedVoice || project.segments.length === 0) {
       updateProgress({
@@ -69,193 +173,83 @@ export function ProcessStep() {
     setIsProcessing(true);
 
     try {
-      // Stage 1: Load FFmpeg
-      updateProgress({
-        stage: 'loading',
-        progress: 0,
-        message: 'Loading FFmpeg...',
-      });
-      
-      await getFFmpeg();
-      
-      updateProgress({
-        stage: 'loading',
-        progress: 100,
-        message: 'FFmpeg loaded',
-      });
+      // Step 1: Upload video
+      const videoUrl = await uploadVideo();
 
-      // Stage 2: Generate TTS for all segments
-      updateProgress({
-        stage: 'tts',
-        progress: 0,
-        message: 'Generating voiceover...',
-      });
+      // Step 2: Start processing job
+      const jobId = await startProcessing(videoUrl);
 
-      interface TTSResult {
-        audio: Blob;
-        duration: number;
-      }
-      
-      const ttsResults: TTSResult[] = [];
-
-      for (let i = 0; i < project.segments.length; i++) {
-        const segment = project.segments[i];
-        
-        updateProgress({
-          stage: 'tts',
-          currentSegment: i + 1,
-          progress: ((i) / project.segments.length) * 100,
-          message: `Synthesizing segment ${i + 1}/${project.segments.length}...`,
-        });
-
-        const result = await synthesizeText(segment.script, project.selectedVoice);
-        ttsResults.push(result);
-      }
-
-      updateProgress({
-        stage: 'tts',
-        progress: 100,
-        message: 'Voiceover complete',
-      });
-
-      // Generate captions
-      if (project.includeCaptions) {
-        const captionData = generateCaptions(
-          project.segments,
-          ttsResults.map((r) => r.duration)
-        );
-        setCaptions(captionData);
-      }
-
-      // Stage 3: Extract video clips
-      updateProgress({
-        stage: 'extracting',
-        progress: 0,
-        message: 'Extracting video clips...',
-      });
-
-      const extractedClips: Blob[] = [];
-
-      for (let i = 0; i < project.segments.length; i++) {
-        const segment = project.segments[i];
-        
-        updateProgress({
-          stage: 'extracting',
-          currentSegment: i + 1,
-          progress: ((i) / project.segments.length) * 100,
-          message: `Extracting clip ${i + 1}/${project.segments.length}...`,
-        });
-
-        // Extract 10 seconds starting from the source timestamp
-        const clip = await extractClip(project.videoFile, segment.sourceTimestamp, 10);
-        extractedClips.push(clip);
-      }
-
-      updateProgress({
-        stage: 'extracting',
-        progress: 100,
-        message: 'Clips extracted',
-      });
-
-      // Stage 4: Face detection and cropping
-      updateProgress({
-        stage: 'detecting',
-        progress: 0,
-        message: 'Detecting faces and cropping...',
-      });
-
-      const processedClips: Blob[] = [];
-
-      for (let i = 0; i < extractedClips.length; i++) {
-        const clip = extractedClips[i];
-        const audioDuration = ttsResults[i].duration;
-
-        updateProgress({
-          stage: 'detecting',
-          currentSegment: i + 1,
-          progress: ((i) / extractedClips.length) * 100,
-          message: `Processing clip ${i + 1}/${extractedClips.length}...`,
-        });
-
-        // Get video dimensions
-        const dimensions = await getVideoDimensions(clip);
-
-        // Extract frames for face detection (every 0.5 seconds)
-        const frames = await extractFrames(clip, 0.5);
-
-        // Detect faces in frames
-        const faceCenters = await analyzeFramesForFaces(frames);
-
-        // Calculate optimal crop
-        const cropRegion = calculateOptimalCrop(
-          faceCenters,
-          dimensions.width,
-          dimensions.height
-        );
-
-        // Apply smart crop
-        const croppedClip = await smartCrop(
-          clip,
-          faceCenters,
-          dimensions.width,
-          dimensions.height
-        );
-
-        // Adjust duration to match TTS audio
-        const clipDuration = await getVideoDuration(croppedClip);
-        const adjustedClip = await adjustDuration(croppedClip, audioDuration, clipDuration);
-
-        processedClips.push(adjustedClip);
-      }
-
-      updateProgress({
-        stage: 'detecting',
-        progress: 100,
-        message: 'Clips processed',
-      });
-
-      // Stage 5: Stitch everything together
-      updateProgress({
-        stage: 'stitching',
-        progress: 0,
-        message: 'Stitching final video...',
-      });
-
-      // Prepare segments for stitching
-      const stitchSegmentData = processedClips.map((video, i) => ({
-        video,
-        audio: ttsResults[i].audio,
-        duration: ttsResults[i].duration,
-      }));
-
-      // Fetch background music if selected
-      let musicBlob: Blob | null = null;
-      if (project.selectedMusic) {
+      // Step 3: Poll for completion
+      const pollForCompletion = async () => {
         try {
-          const response = await fetch(project.selectedMusic.filePath);
-          if (response.ok) {
-            musicBlob = await response.blob();
+          const status = await pollJobStatus(jobId);
+
+          // Update UI with server status
+          updateProgress({
+            stage: status.stage as ProcessingStage,
+            currentSegment: status.currentSegment,
+            totalSegments: status.totalSegments,
+            progress: status.progress,
+            message: status.message,
+            error: status.error,
+          });
+
+          if (status.status === 'complete') {
+            // Processing complete
+            if (pollingRef.current) {
+              clearInterval(pollingRef.current);
+              pollingRef.current = null;
+            }
+
+            // Save output URL
+            if (status.outputUrl) {
+              setOutputUrl(status.outputUrl);
+            }
+
+            // Save captions if provided
+            if (status.captions) {
+              setCaptions(status.captions.map((c) => ({
+                segmentId: c.segmentId,
+                words: c.words,
+              })));
+            }
+
+            updateProgress({
+              stage: 'complete',
+              progress: 100,
+              message: 'Video processing complete!',
+            });
+
+            setIsProcessing(false);
+            processingRef.current = false;
+
+          } else if (status.status === 'error') {
+            // Processing failed
+            if (pollingRef.current) {
+              clearInterval(pollingRef.current);
+              pollingRef.current = null;
+            }
+
+            updateProgress({
+              stage: 'error',
+              message: 'Processing failed',
+              error: status.error || 'Unknown error occurred',
+            });
+
+            setIsProcessing(false);
+            processingRef.current = false;
           }
+          // Otherwise continue polling
         } catch (error) {
-          console.warn('Failed to load background music:', error);
+          console.error('Polling error:', error);
+          // Don't stop polling on transient errors
         }
-      }
+      };
 
-      // Stitch all segments
-      const finalVideo = await stitchSegments(
-        stitchSegmentData,
-        musicBlob,
-        project.musicVolume
-      );
-
-      // Save output
-      setOutputVideo(finalVideo);
-
-      updateProgress({
-        stage: 'complete',
-        progress: 100,
-        message: 'Video processing complete!',
-      });
+      // Start polling
+      pollingRef.current = setInterval(pollForCompletion, POLL_INTERVAL);
+      // Also poll immediately
+      await pollForCompletion();
 
     } catch (error) {
       console.error('Processing error:', error);
@@ -264,26 +258,35 @@ export function ProcessStep() {
         message: 'Processing failed',
         error: error instanceof Error ? error.message : 'Unknown error occurred',
       });
-    } finally {
       setIsProcessing(false);
       processingRef.current = false;
     }
-  }, [project, updateProgress, setOutputVideo, setCaptions]);
+  }, [project, serverProcessing, updateProgress, setOutputUrl, setJobId, setVideoUrl, setCaptions]);
 
   // Start processing automatically
   useEffect(() => {
-    if (!isProcessing && processingState.stage === 'loading') {
+    if (!isProcessing && processingState.stage === 'uploading' && !processingRef.current) {
       processVideo();
     }
+
+    // Cleanup polling on unmount
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    };
   }, []);
 
   const getStageInfo = (stage: ProcessingStage) => {
     const stages: Record<ProcessingStage, { label: string; icon: string }> = {
-      loading: { label: 'Loading Libraries', icon: '⏳' },
+      uploading: { label: 'Uploading Video', icon: '⬆️' },
+      queued: { label: 'Queued', icon: '⏳' },
+      loading: { label: 'Loading Libraries', icon: '⚙️' },
       tts: { label: 'Generating Voiceover', icon: '🎙️' },
       extracting: { label: 'Extracting Clips', icon: '🎬' },
-      detecting: { label: 'Smart Cropping', icon: '🔍' },
-      cropping: { label: 'Applying Crops', icon: '✂️' },
+      detecting: { label: 'Detecting Faces', icon: '🔍' },
+      cropping: { label: 'Smart Cropping', icon: '✂️' },
       stitching: { label: 'Stitching Video', icon: '🎞️' },
       complete: { label: 'Complete', icon: '✅' },
       error: { label: 'Error', icon: '❌' },
@@ -309,7 +312,7 @@ export function ProcessStep() {
             ? 'Your short video is ready for preview'
             : processingState.stage === 'error'
             ? 'An error occurred during processing'
-            : 'Please wait while we create your short video'}
+            : 'Processing on Vercel Fluid Compute'}
         </p>
       </div>
 
@@ -356,11 +359,11 @@ export function ProcessStep() {
 
         {/* Stage timeline */}
         {processingState.stage !== 'error' && (
-          <div className="grid grid-cols-5 gap-2 pt-4 border-t border-[var(--border)]">
-            {(['tts', 'extracting', 'detecting', 'stitching', 'complete'] as ProcessingStage[]).map(
-              (stage, index) => {
+          <div className="grid grid-cols-6 gap-2 pt-4 border-t border-[var(--border)]">
+            {(['uploading', 'tts', 'extracting', 'detecting', 'stitching', 'complete'] as ProcessingStage[]).map(
+              (stage) => {
                 const info = getStageInfo(stage);
-                const stageOrder = ['loading', 'tts', 'extracting', 'detecting', 'cropping', 'stitching', 'complete'];
+                const stageOrder = ['uploading', 'queued', 'loading', 'tts', 'extracting', 'detecting', 'cropping', 'stitching', 'complete'];
                 const currentOrder = stageOrder.indexOf(processingState.stage);
                 const thisOrder = stageOrder.indexOf(stage);
                 const isActive = processingState.stage === stage;
@@ -389,6 +392,16 @@ export function ProcessStep() {
             <p className="text-sm">{processingState.error}</p>
           </div>
         )}
+
+        {/* Server processing badge */}
+        {processingState.stage !== 'error' && processingState.stage !== 'complete' && (
+          <div className="flex items-center justify-center gap-2 text-sm text-[var(--text-muted)]">
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+            </svg>
+            <span>Powered by Vercel Fluid Compute</span>
+          </div>
+        )}
       </div>
 
       {/* Info card */}
@@ -415,9 +428,9 @@ export function ProcessStep() {
               </p>
             </div>
             <div>
-              <p className="text-[var(--text-muted)]">Captions</p>
-              <p className="font-medium text-[var(--text-primary)]">
-                {project.includeCaptions ? 'Enabled' : 'Disabled'}
+              <p className="text-[var(--text-muted)]">Job ID</p>
+              <p className="font-medium text-[var(--text-primary)] font-mono text-xs">
+                {serverProcessing.jobId ? serverProcessing.jobId.slice(0, 8) + '...' : 'Pending'}
               </p>
             </div>
           </div>
@@ -429,13 +442,23 @@ export function ProcessStep() {
         <Button
           variant="secondary"
           onClick={prevStep}
-          disabled={isProcessing}
+          disabled={isProcessing && processingState.stage !== 'error'}
         >
           Back to Upload
         </Button>
 
         {processingState.stage === 'error' && (
-          <Button onClick={processVideo}>
+          <Button onClick={() => {
+            setProcessingState({
+              stage: 'uploading',
+              currentSegment: 0,
+              totalSegments: project.segments.length,
+              progress: 0,
+              message: 'Preparing to upload...',
+            });
+            processingRef.current = false;
+            processVideo();
+          }}>
             Retry Processing
           </Button>
         )}

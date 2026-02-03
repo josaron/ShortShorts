@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useProjectStore } from '@/store/projectStore';
 import { Button, VideoPlayer } from '@/components/ui';
 import { WordHighlight } from '@/components/captions';
@@ -9,9 +9,21 @@ import { formatDuration } from '@/lib/utils/time';
 export function PreviewStep() {
   const {
     project,
+    serverProcessing,
     prevStep,
     resetProject,
   } = useProjectStore();
+
+  // Get video source - prefer server URL, fallback to local blob
+  const videoSource = useMemo(() => {
+    if (serverProcessing.outputUrl) {
+      return serverProcessing.outputUrl;
+    }
+    return project.outputVideo;
+  }, [serverProcessing.outputUrl, project.outputVideo]);
+
+  // Check if we have a video from either source
+  const hasVideo = Boolean(videoSource);
 
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -27,20 +39,37 @@ export function PreviewStep() {
   }, []);
 
   const handleExport = useCallback(async () => {
-    if (!project.outputVideo) return;
+    if (!videoSource) return;
 
     setIsExporting(true);
 
     try {
+      let downloadUrl: string;
+      let shouldRevoke = false;
+
+      if (typeof videoSource === 'string') {
+        // Server URL - download the file first
+        const response = await fetch(videoSource);
+        const blob = await response.blob();
+        downloadUrl = URL.createObjectURL(blob);
+        shouldRevoke = true;
+      } else {
+        // Local Blob
+        downloadUrl = URL.createObjectURL(videoSource);
+        shouldRevoke = true;
+      }
+
       // Create download link
-      const url = URL.createObjectURL(project.outputVideo);
       const a = document.createElement('a');
-      a.href = url;
+      a.href = downloadUrl;
       a.download = `${project.name.replace(/\s+/g, '_')}_short.mp4`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      
+      if (shouldRevoke) {
+        URL.revokeObjectURL(downloadUrl);
+      }
 
       setExportSuccess(true);
     } catch (error) {
@@ -48,7 +77,7 @@ export function PreviewStep() {
     } finally {
       setIsExporting(false);
     }
-  }, [project.outputVideo, project.name]);
+  }, [videoSource, project.name]);
 
   const handleStartOver = useCallback(() => {
     if (confirm('Are you sure you want to start over? This will clear your current project.')) {
@@ -56,7 +85,7 @@ export function PreviewStep() {
     }
   }, [resetProject]);
 
-  if (!project.outputVideo) {
+  if (!hasVideo) {
     return (
       <div className="text-center py-16">
         <div className="text-6xl mb-4">🎬</div>
@@ -89,7 +118,7 @@ export function PreviewStep() {
       <div className="flex justify-center">
         <div className="w-full max-w-sm">
           <VideoPlayer
-            src={project.outputVideo}
+            src={videoSource!}
             aspectRatio="9:16"
             showControls={true}
             onTimeUpdate={handleTimeUpdate}
@@ -134,7 +163,9 @@ export function PreviewStep() {
           <div>
             <p className="text-[var(--text-muted)]">Size</p>
             <p className="font-medium text-[var(--text-primary)]">
-              {(project.outputVideo.size / (1024 * 1024)).toFixed(1)} MB
+              {project.outputVideo 
+                ? `${(project.outputVideo.size / (1024 * 1024)).toFixed(1)} MB`
+                : 'N/A'}
             </p>
           </div>
         </div>
