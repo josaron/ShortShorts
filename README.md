@@ -1,36 +1,99 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ShortShorts - AI Video Shorts Creator
 
-## Getting Started
+Create engaging YouTube Shorts from long-form educational videos with AI-powered TTS and smart cropping. All processing happens in your browser - your video never leaves your device.
 
-First, run the development server:
+## Features
+
+- **Script-Based Editing**: Import Gemini-generated scripts with timestamps
+- **AI Text-to-Speech**: Generate professional voiceovers using Piper TTS
+- **Smart Cropping**: Automatic face detection and 9:16 cropping with MediaPipe
+- **Background Music**: Choose from 12 royalty-free tracks
+- **Word-by-Word Captions**: Animated caption highlighting
+- **Client-Side Processing**: All video processing with FFmpeg.wasm
+
+## Quick Start
 
 ```bash
+# Install dependencies
+npm install
+
+# Run development server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+
+# Build for production
+npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) to start creating shorts.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Workflow
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. **Upload**: Add your source video and paste your script
+2. **Configure**: Select voice, music, and caption options
+3. **Process**: Generate TTS, extract clips, apply smart cropping
+4. **Preview**: Review your short and export
 
-## Learn More
+## Script Format
 
-To learn more about Next.js, take a look at the following resources:
+Import scripts in this 3-column format:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+Time | Script/Voiceover | [Source Timestamp] (Description)
+00:00 | Your opening hook text here | [23:23] (Scene description)
+00:06 | More narration content | [24:02] (Another scene)
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Tech Stack
 
-## Deploy on Vercel
+- **Next.js 14** - React framework with App Router
+- **FFmpeg.wasm** - Client-side video processing
+- **Piper TTS** - Neural text-to-speech (WASM)
+- **MediaPipe** - Face detection for smart cropping
+- **Tailwind CSS** - Styling
+- **Zustand** - State management
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Output Specifications
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Dimensions**: 720 x 1280 (9:16 aspect ratio)
+- **Format**: MP4 (H.264 video, AAC audio)
+- **Duration**: Optimized for 45-75 seconds
+
+## Setup Music & Voice Assets
+
+### Music (public/music/)
+
+Download royalty-free tracks from:
+- [Pixabay Music](https://pixabay.com/music/)
+- [Free Music Archive](https://freemusicarchive.org/)
+
+See `public/music/README.md` for required files.
+
+### Voices (public/voices/)
+
+Download Piper TTS models from:
+- [Piper Releases](https://github.com/rhasspy/piper/releases)
+
+See `public/voices/README.md` for required files.
+
+## Browser Requirements
+
+- Chrome 89+ or Edge 89+ (for SharedArrayBuffer support)
+- 4GB+ RAM recommended for video processing
+- WebGL support (for MediaPipe)
+
+## Deployment
+
+Optimized for Vercel deployment. Required headers for SharedArrayBuffer are configured in `next.config.ts`.
+
+```bash
+npm run build
+vercel deploy
+```
+
+## Privacy
+
+All processing is 100% client-side. Your videos are never uploaded to any server.
+
+## License
+
+MIT
