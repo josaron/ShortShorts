@@ -2,15 +2,15 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "fluid": true,
   "functions": {
-    "app/api/process/route.ts": {
+    "src/app/api/process/route.ts": {
       "maxDuration": 300,
       "memory": 3008
     },
-    "app/api/upload/route.ts": {
+    "src/app/api/upload/route.ts": {
       "maxDuration": 60
     },
-    "app/api/synthesize/route.ts": {
-      "maxDuration": 120
+    "src/app/api/status/[jobId]/route.ts": {
+      "maxDuration": 30
     }
   }
 }
